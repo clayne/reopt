@@ -1036,8 +1036,8 @@ logEvent s t m = incCompLog (ReoptLogEvent s t m)
 stepFinished :: ReoptStep arch a -> a -> IncCompM (ReoptLogEvent arch) r ()
 stepFinished s x = incCompLog (ReoptStepFinished s x)
 
-stepFailed :: ReoptStep arch a -> String -> IncCompM (ReoptLogEvent arch) r ()
-stepFailed s m = incCompLog (ReoptStepFailed s m)
+stepFailed :: ReoptStep arch a -> ReoptFailureTag -> String -> IncCompM (ReoptLogEvent arch) r ()
+stepFailed s tag m = incCompLog (ReoptStepFailed s tag m)
 
 ---------------------------------------------------------------------------------
 -- Initial type inference
@@ -1717,25 +1717,27 @@ x86ArgumentAnalysis sysp funNameMap knownFunTypeMap discState = do
       resolveFn callSite callRegs = do
         callArgValues <$> x86CallRegs mem funNameMap knownFunTypeMap callSite callRegs
 
-  stepStarted FunctionArgInference
+  stepStarted $ FunctionArgInference Nothing
 
   let (dems, summaryFails) =
         functionDemands (x86DemandInfo sysp) mem resolveFn $
           filter (not . known) $ exploredFunctions discState
 
-  forM_ (Map.toList summaryFails) $ \(faddr, rsn) -> do
+  forM_ (Map.toList summaryFails) $ \(faddrOff, rsn) -> do
+    let dnm = do Some finfo <- Map.lookup faddrOff (discState^.funInfo)
+                 discoveredFunSymbol finfo
+    let faddrAndNm = do Some finfo <- Map.lookup faddrOff (discState^.funInfo)
+                        pure $ (memWordValue (addrOffset (segoffAddr ( discoveredFunAddr finfo))), discoveredFunSymbol finfo)
     case rsn of
       PLTStubNotSupported ->
         pure () -- error "internal x86ArgumentAnalysis provided PLTStub"
       CallAnalysisError callSite msg -> do
-        let dnm = do
-              Some finfo <- Map.lookup faddr (discState^.funInfo)
-              discoveredFunSymbol finfo
-        logEvent FunctionArgInference ReoptWarning $
-          printf "Call analysis at %s in %s failed:\n  %s" (ppSegOff callSite) (ppFnEntry dnm faddr) msg
-  stepFinished FunctionArgInference ()
+        let errMsg = printf "Call analysis at %s in %s failed:\n  %s" (ppSegOff callSite) (ppFnEntry dnm faddrOff) msg
+        stepFailed (FunctionArgInference faddrAndNm) MacawCallAnalysisErrorTag errMsg
+  stepFinished (FunctionArgInference Nothing) ()
   pure $ inferFunctionTypeFromDemands dems
 
+-- let faddr = discoveredFunAddr finfo (memWordValue (addrOffset (segoffAddr faddr)))
 
 -- | Analyze an elf binary to extract information.
 --
@@ -1797,8 +1799,8 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap _pltFns debugTypeMap discState = d
       case checkFunction finfo of
         FunctionOK -> do
           case x86BlockInvariants sysp mem funNameMap funTypeMap finfo of
-            Left msg -> do
-              stepFailed fnInvEvt msg
+            Left (failTag, msg) -> do
+              stepFailed fnInvEvt failTag msg
               pure Nothing
             Right invMap -> do
               stepFinished fnInvEvt invMap
@@ -1806,20 +1808,20 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap _pltFns debugTypeMap discState = d
               let fnRecEvt = Recovery (memWordValue (addrOffset (segoffAddr faddr))) dnm
               stepStarted fnRecEvt
               case recoverFunction sysp funNameMap funTypeMap mem finfo invMap of
-                Left msg -> do
-                  stepFailed fnRecEvt msg
+                Left (errTag, errMsg) -> do
+                  stepFailed fnRecEvt errTag errMsg
                   pure Nothing
                 Right (warnings, fn) -> do
                   mapM_ (logEvent fnRecEvt ReoptWarning) warnings
                   stepFinished fnRecEvt ()
                   pure (Just fn)
-        FunctionIncomplete -> do
-          stepFailed fnInvEvt "Incomplete discovery."
+        FunctionIncomplete errTag -> do
+          stepFailed fnInvEvt errTag "Incomplete discovery."
           pure Nothing
         -- We should have filtered out PLT entries from the explored functions,
         -- so this is considered an error.
         FunctionHasPLT -> do
-          stepFailed fnInvEvt "Encountered unexpected PLT stub."
+          stepFailed fnInvEvt ReoptCannotRecoverFnWithPLTStubsTag "Encountered unexpected PLT stub."
           pure Nothing
   -- Get list of names of functions defined
   let definedNames :: Set.Set BSC.ByteString
@@ -2102,13 +2104,29 @@ recoverLogEvent statsRef event = do
       let update s = s { statsFnResults = Map.insert (mNm, addr) FnRecovered (statsFnResults s)
                        , statsFnRecoveredCount = 1 + (statsFnRecoveredCount s) }
       modifyIORef' statsRef update
-    ReoptStepFailed (Recovery addr mNm) _errMsg -> do
-      let update s = s { statsFnResults = Map.insert (mNm, addr) FnFailedRecovery (statsFnResults s)
-                       , statsFnFailedCount = 1 + statsFnFailedCount s
+    ReoptStepFailed (Discovery addr mNm) errTag _errMsg -> do
+      let update s = s { statsFnResults = incFnResult mNm addr FnFailedDiscovery $ statsFnResults s
+                       , statsFnFailures = incFnFailure DiscoveryStepTag errTag $ statsFnFailures s
                        }
       modifyIORef' statsRef update
+    ReoptStepFailed (Recovery addr mNm) errTag _errMsg -> do
+      let update s = s { statsFnResults = incFnResult mNm addr FnFailedRecovery $ statsFnResults s
+                       , statsFnFailures = incFnFailure RecoveryStepTag errTag $ statsFnFailures s
+                       }
+      modifyIORef' statsRef update
+    ReoptStepFailed (Recovery addr mNm) errTag _errMsg -> do
+      let update s = s { statsFnResults = incFnResult mNm addr FnFailedRecovery $ statsFnResults s
+                       , statsFnFailures = incFnFailure RecoveryStepTag errTag $ statsFnFailures s
+                       }
+      modifyIORef' statsRef update
+    -- BOOKMARK failure for non-Recovery steps
     _ -> pure ()
 
+  -- = FnDiscovered
+  -- | FnRecovered
+  -- | FnFailedRecovery
+  -- | FnFailedArgInference
+  -- | FnLLVMFailed
 
 -- | Parse arguments to get information needed for function representation.
 recoverFunctions

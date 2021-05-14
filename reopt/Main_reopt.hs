@@ -48,6 +48,7 @@ import           Reopt
 import           Reopt.EncodeInvariants
 import           Reopt.Server
 import           Reopt.CFG.FnRep.X86 ()
+import           Reopt.Events (ReoptFailureTag(..))
 import           Reopt.ExternalTools (run_slash)
 import           Reopt.CFG.FnRep.X86 ()
 import           Reopt.Utils.Builder (builderWriteFile)
@@ -566,7 +567,7 @@ collectInvariants ref evt = do
     ReoptStepFinished (InvariantInference addr _mnm) invMap -> do
       let enc = encodeInvariantMsg addr invMap
       seq enc $ modifyIORef' ref $ (enc:)
-    ReoptStepFailed (InvariantInference addr _mnm) msg -> do
+    ReoptStepFailed (InvariantInference addr _mnm) ReoptInvariantInferenceFailureTag msg -> do
       let enc = encodeInvariantFailedMsg addr msg
       seq enc $ modifyIORef' ref $ (enc:)
     _ -> do

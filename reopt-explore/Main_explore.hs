@@ -8,9 +8,11 @@ import Control.Exception (catch, SomeException)
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Builder as BS
 import qualified Data.ByteString.Lazy as BSL
+import Data.List ( intercalate )
 import Data.Macaw.Discovery ( DiscoveryOptions(..) )
 import Data.Macaw.X86 ( X86_64 )
-import Data.List ( intercalate )
+import           Data.Map (Map)
+import qualified Data.Map.Strict as Map
 import Data.Maybe ( isNothing )
 import Data.Version ( Version(versionBranch) )
 import Numeric.Natural ( Natural )
@@ -204,15 +206,15 @@ exploreBinary args results fPath = do
 data SummaryStats =
   SummaryStats
   { totalBinaryCount :: Natural
-  -- ^ Which binary are these statistics for?
+  -- ^ How many binaries were analyzed?
   , totalFnDiscoveredCount :: Natural
   -- ^ Number of discovered functions.
   , totalFnRecoveredCount :: Natural
   -- ^ Number of successfully recovered functions.
   , totalFnFailedCount :: Natural
   -- ^ Number of functions which failed during recovery.
-  , totalErrorCount :: Natural
-  -- ^ Overall number of errors encountered while exploring binaries.
+  , totalFnFailures :: Map ReoptStepTag (Map ReoptFailureTag Natural)
+  -- ^ Overall collection of failures by tag.
   , totalFailedBinaries :: Natural
   -- ^ Number of binaries which failed to complete discovery.
   , totalLLVMGenerated :: Natural
@@ -230,7 +232,7 @@ renderSummaryStats results = formatSummary $ foldr processResult initSummaryStat
       acc { totalBinaryCount = 1 + (totalBinaryCount acc)
           , totalFnDiscoveredCount = (statsFnDiscoveredCount s) + (totalFnDiscoveredCount acc)
           , totalFnRecoveredCount = (statsFnRecoveredCount s) + (totalFnRecoveredCount acc)
-          , totalFnFailedCount = (statsFnFailedCount s) + (totalFnFailedCount acc)
+          , totalFnFailures = mergeFnFailures (statsFnFailures s) (totalFnFailures acc)
           , totalErrorCount = (statsErrorCount s) + (totalErrorCount acc)
           , totalLLVMGenerated = (totalLLVMGenerated acc) + (if llvmGenSuccess llvmGenRes then 1 else 0)
           }
@@ -247,9 +249,10 @@ renderSummaryStats results = formatSummary $ foldr processResult initSummaryStat
             failedPercent :: Double = (fromIntegral $ totalFnFailedCount s) / (fromIntegral $  totalFnDiscoveredCount s)
         in "\nrepot generated LLVM bitcode for "++(show $ totalLLVMGenerated s)++" out of "++(show $ totalBinaryCount s)++" binaries."++
            "\nreopt discovered " ++ (show (totalFnDiscoveredCount s)) ++ " functions while exploring "++(show $ totalBinaryCount s)++" binaries:" ++
-           "\n  recovery succeeded: " ++ (printf "%d (%.2f%%)" (totalFnDiscoveredCount s) ++
-           "\n     recovery failed: " ++ (printf "%d (%.2f%%)" (totalFnFailedCount s) (failed * 100.0) ++
-           "\n"++(show $ totalErrorCount s)++" errors occurred during exploration."
+           "\n  recovery succeeded: " ++ (printf "%d (%.2f%%)" (totalFnDiscoveredCount s)) ++
+           "\n     recovery failed: " ++ (printf "%d (%.2f%%)" (totalFnFailedCount s) (failed * 100.0)) ++
+           "\n"++(show $ totalErrorCount s)++" errors occurred during exploration." ++
+           "\n"++(renderAllFailures $ totalFnFailures s)
 
 
 
