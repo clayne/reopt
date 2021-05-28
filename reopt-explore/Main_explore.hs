@@ -23,15 +23,16 @@ import Reopt
       ReoptStepTag(..),
       ReoptErrorTag(..),
       copyrightNotice,
+      ReoptSummary(..),
+      summaryHeader,
+      summaryRows,
       ReoptStats(..),
-      statsHeader,
       renderLLVMBitcode,
       defaultLLVMGenOptions,
       latestLLVMConfig,
       renderAllFailures,
       stepErrorCount,
       mergeFnFailures,
-      statsRows,
       RecoveredModule,
       X86OS,
       emptyAnnDeclarations,
@@ -151,7 +152,7 @@ llvmGenSuccess LLVMGenPass{} = True
 llvmGenSuccess LLVMGenFail{} = False
 
 data ExplorationResult
-  = ExplorationStats ReoptStats LLVMGenResult
+  = ExplorationStats ReoptSummary ReoptStats LLVMGenResult
   | ExplorationError FilePath String
 
 formatNatural :: Natural -> String
@@ -191,9 +192,9 @@ binStats stats llvmGen =
 renderExplorationResult :: ExplorationResult -> String
 renderExplorationResult =
   \case
-    ExplorationStats stats (LLVMGenPass sz)  -> do
+    ExplorationStats _ stats (LLVMGenPass sz)  -> do
       binStats stats $ printf "Succeeded (%s bytes generated)" (formatNatural sz)
-    ExplorationStats stats (LLVMGenFail errMsg)  ->
+    ExplorationStats _ stats (LLVMGenFail errMsg)  ->
       binStats stats ("Failed: " ++ errMsg)
     ExplorationError fpath errMsg ->
       unlines $
@@ -222,12 +223,13 @@ exploreBinary args results fPath = do
                          , roExcluded = []
                          }
     unnamedFunPrefix = BSC.pack "reopt"
-    performRecovery :: IO ExplorationResult
-    performRecovery = do
+    performRecovery :: ReoptStats -> IO ExplorationResult
+    performRecovery stats = do
         hPutStrLn stderr $ "Analyzing " ++ fPath ++ " ..."
         stat <- getFileStatus fPath
         let progSize = fileSize stat
-        statsRef <- newIORef $ initReoptStats fPath (fromIntegral progSize)
+        summaryRef <- newIORef $ initReoptSummary fPath
+        statsRef <- newIORef stats
         let logger | verbose args = joinLogEvents printLogEvent (recoverLogEvent statsRef)
                    | otherwise = recoverLogEvent statsRef
         (_, os, _, recMod, _) <-
@@ -300,15 +302,15 @@ renderSummaryStats results = formatSummary $ foldr processResult initSummaryStat
   where
     processResult :: ExplorationResult -> SummaryStats -> SummaryStats
     processResult (ExplorationStats s llvmGenRes) acc =
-      acc { totalBinaryCount = 1 + (totalBinaryCount acc)
+      acc { totalBinaryCount = 1 + totalBinaryCount acc
+          , totalLLVMGenerated = (totalLLVMGenerated acc) + (if llvmGenSuccess llvmGenRes then 1 else 0)
+
           , totalBinaryBytes = (statsBinarySize s) + (totalBinaryBytes acc)
           , totalInitEntryPointCount = (statsInitEntryPointCount s) + (totalInitEntryPointCount acc)
           , totalFnDiscoveredCount = (statsFnDiscoveredCount s) + (totalFnDiscoveredCount acc)
           , totalFnRecoveredCount = (statsFnRecoveredCount s) + (totalFnRecoveredCount acc)
           , totalFnFailures = mergeFnFailures (statsStepErrors s) (totalFnFailures acc)
           , totalErrorCount = (statsErrorCount s) + (totalErrorCount acc)
-          , totalLLVMGenerated = (totalLLVMGenerated acc) + (if llvmGenSuccess llvmGenRes then 1 else 0)
-          , totalLLVMBytes = (totalLLVMBytes acc) + (case llvmGenRes of LLVMGenPass sz -> sz; _ -> 0)
           }
     processResult (ExplorationError _ _) acc =
       acc { totalBinaryCount = 1 + (totalBinaryCount acc)
@@ -327,7 +329,6 @@ renderSummaryStats results = formatSummary $ foldr processResult initSummaryStat
            "\n  " ++ (printf "%d functions" (totalFnDiscoveredCount s)) ++
            "\n"++(printf "%d (%.2f%%) discovered functions were successfully recovered." (totalFnRecoveredCount s) (passedPercent * 100.0)) ++
            "\nreopt generated LLVM bitcode for "++(show $ totalLLVMGenerated s)++" out of "++(show $ totalBinaryCount s)++" binaries."++
-           "\n"++(printf "%s bytes of textual LLVM bitcode were generated." (formatNatural $ totalLLVMBytes s))++
            "\n"++(show $ totalFailureCount s)++" errors/warnings during exploration." ++
            "\nError metrics:" ++
            "\n"++(renderAllFailures $ totalFnFailures s)
@@ -349,7 +350,7 @@ main = do
       case exportFnResultsPath args of
         Nothing -> pure ()
         Just exportPath -> do
-          let hdrStr = intercalate "," statsHeader
+          let hdrStr = intercalate "," summaryHeader
               rowsStr = map (intercalate ",") $ concatMap toRows results
           writeFile exportPath $ unlines $ hdrStr:rowsStr
           hPutStrLn stderr $ "CSV-formatted function result statistics written to " ++ exportPath ++ "."
@@ -362,7 +363,7 @@ main = do
           hPutStrLn stderr $ "Summary statistics written to " ++ exportPath ++ "."
   where
     toRows :: ExplorationResult -> [[String]]
-    toRows (ExplorationStats stats _) = statsRows stats
+    toRows (ExplorationStats stats _) = summaryRows stats
     toRows (ExplorationError _ _) = [[]]
 
 

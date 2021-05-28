@@ -45,6 +45,7 @@ import Data.Macaw.Discovery
 import           Data.Macaw.X86
 
 import           Reopt
+import           Reopt.Events
 import           Reopt.EncodeInvariants
 import           Reopt.Server
 import           Reopt.CFG.FnRep.X86 ()
@@ -449,7 +450,6 @@ occamFlag =
   where upd path cfg = Right $ cfg {occamConfigPath = Just path}
         help = printf "Enables OCCAM as reopt's optimizer using the manifest at PATH."
 
-
 arguments :: Mode Args
 arguments = mode "reopt" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
@@ -569,10 +569,10 @@ collectInvariants :: IORef [Aeson.Encoding]
                   -> IO ()
 collectInvariants ref evt = do
   case evt of
-    ReoptStepFinished (InvariantInference addr _mnm) invMap -> do
+    ReoptStepFinished (FunStep InvariantInference (FunId addr _mnm)) invMap -> do
       let enc = encodeInvariantMsg addr invMap
       seq enc $ modifyIORef' ref $ (enc:)
-    ReoptStepFailed (InvariantInference addr _mnm) ReoptInvariantInferenceFailureTag msg -> do
+    ReoptStepFailed (FunStep InvariantInference (FunId addr _mnm)) (ReoptInvariantInferenceFailureTag, msg) -> do
       let enc = encodeInvariantFailedMsg addr msg
       seq enc $ modifyIORef' ref $ (enc:)
     _ -> do
@@ -687,9 +687,10 @@ performReopt args = do
   hPutStrLn stderr "Performing final relinking."
   mergeAndWrite outPath origElf "new object" objContents relinkerInfo
 
-getFunctions :: Args -> IO (X86OS, RecoveredModule X86_64, ReoptStats)
+getFunctions :: Args -> IO (X86OS, RecoveredModule X86_64, ReoptSummary, ReoptStats)
 getFunctions args =
-  recoverFunctions (programPath args)
+  recoverFunctions initReoptStats
+                   (programPath args)
                    (clangPath args)
                    (loadOptions args)
                    (args^.discOpts)
@@ -709,14 +710,14 @@ main' = do
         hPutStrLn h =<< showCFG args
     -- Write function discovered
     ShowFunctions -> do
-      (_,recMod, _stats) <- getFunctions args
+      (_,recMod, _summary, _stats) <- getFunctions args
       writeOutput (outputPath args) $ \h -> do
         mapM_ (hPutStrLn h . show . pretty) (recoveredDefs recMod)
     ShowLLVM -> do
       when (isJust (annotationsExportPath args) && isNothing (outputPath args)) $ do
         hPutStrLn stderr "Must specify --output for LLVM when generating annotations."
         exitFailure
-      (os, recMod, stats) <- getFunctions args
+      (os, recMod, _summary, stats) <- getFunctions args
       let (llvmMod, mFunAnn) = renderLLVMBitcode (llvmGenOptions args)
                                                  (llvmVersion args)
                                                  os
